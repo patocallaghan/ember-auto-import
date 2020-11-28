@@ -131,6 +131,8 @@ export default class Bundler extends Plugin {
     for (let bundle of this.options.bundles.names) {
       if (entrypoints.has(bundle)) {
         entrypoints.get(bundle)!.forEach(asset => {
+          // @ts-ignore
+          asset = typeof asset === 'string' ? asset : asset.name;
           copySync(
             join(dir, asset),
             join(this.outputPath, 'entrypoints', bundle, asset)
@@ -144,6 +146,8 @@ export default class Bundler extends Plugin {
     let contents = lazyAssets
       .map(asset => {
         // we copy every lazy asset into place here
+        // @ts-ignore
+        asset = typeof asset === 'string' ? asset : asset.name;
         let content = readFileSync(join(dir, asset));
         writeFileSync(join(this.outputPath, 'lazy', asset), content);
 
