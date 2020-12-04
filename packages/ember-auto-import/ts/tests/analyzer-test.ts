@@ -28,7 +28,7 @@ Qmodule('analyzer', function(hooks) {
       babelMajorVersion: 6,
       fileExtensions: ['js']
     };
-    analyzer = new Analyzer(new UnwatchedDir(upstream), pack as Package);
+    analyzer = new Analyzer(new UnwatchedDir(upstream));
     builder = new broccoli.Builder(analyzer);
   });
 

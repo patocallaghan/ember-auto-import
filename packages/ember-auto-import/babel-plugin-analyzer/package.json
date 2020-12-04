@@ -1,0 +1,7 @@
+{
+  "name": "ember-auto-import-internal-babel-plugin-analyzer",
+  "private": true,
+  "engines":{
+    "node": ">= 6"
+  }
+}
