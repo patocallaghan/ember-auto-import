@@ -4,6 +4,7 @@ import { readFileSync } from 'fs';
 import { Memoize } from 'typescript-memoize';
 import { Configuration } from 'webpack';
 import { AddonInstance, isDeepAddonInstance, Project } from './ember-cli-models';
+import type { ParseOptions } from '@swc/core/types';
 
 // from child addon instance to their parent package
 const parentCache: WeakMap<AddonInstance, Package> = new WeakMap();
@@ -23,6 +24,7 @@ export interface Options {
   webpack?: Configuration;
   publicAssetURL?: string;
   forbidEval?: boolean;
+  useSwcParser?: boolean;
   skipBabel?: { package: string; semverRange?: string }[];
   watchDependencies?: (string | string[])[];
 }
@@ -60,6 +62,7 @@ export default class Package {
   private _hasBabelDetails = false;
   private _babelMajorVersion?: number;
   private _babelOptions: any;
+  private _swcOptions: any;
   private _emberCLIBabelExtensions?: string[];
   private autoImportOptions: Options | undefined;
   private isDeveloping: boolean;
@@ -287,6 +290,14 @@ export default class Package {
 
   get skipBabel(): Options['skipBabel'] {
     return this.autoImportOptions && this.autoImportOptions.skipBabel;
+  }
+
+  get swcOptions(): ParseOptions {
+    return this._swcOptions;
+  }
+
+  get useSwcParser(): boolean {
+    return Boolean(this.autoImportOptions && this.autoImportOptions.useSwcParser);
   }
 
   private aliasFor(name: string): string {

@@ -10,7 +10,18 @@ import type Package from './package';
 import symlinkOrCopy from 'symlink-or-copy';
 import { TransformOptions } from '@babel/core';
 import { CallExpression, Expression, File, TSType } from '@babel/types';
+import type { Program } from '@swc/core/types';
 import traverse from '@babel/traverse';
+import {
+  transformSync as swcTransfromSync,
+  Expression as SwcExpression,
+  ImportDeclaration as SwcImportDeclaration,
+  ExportNamedDeclaration as SwcExportNamedDeclaration,
+  CallExpression as SwcCallExpression,
+  TemplateElement as SwcTemplateElement,
+} from '@swc/core';
+import type { ParseOptions } from '@swc/core/types';
+import Visitor from '@swc/core/Visitor';
 
 makeDebug.formatters.m = (modules: Import[]) => {
   return JSON.stringify(
@@ -77,7 +88,7 @@ export default class Analyzer extends Plugin {
   private modules: Import[] | null = [];
   private paths: Map<string, Import[]> = new Map();
 
-  private parse: undefined | ((source: string) => File);
+  private parse: undefined | ((source: string) => File | Program);
 
   constructor(inputTree: Node, private pack: Package, private treeType?: TreeType) {
     super([inputTree], {
@@ -90,6 +101,14 @@ export default class Analyzer extends Plugin {
     if (this.parse) {
       return;
     }
+
+    if (this.pack.useSwcParser) {
+      console.log('swc parser')
+      this.parse = await swcParser(this.pack.swcOptions);
+      return;
+    }
+
+    console.log('babel parser')
     switch (this.pack.babelMajorVersion) {
       case 7:
         this.parse = await babel7Parser(this.pack.babelOptions);
@@ -164,12 +183,14 @@ export default class Analyzer extends Plugin {
   }
 
   updateImports(relativePath: string, source: string) {
+    // console.time("updateImports");
     debug(`updating imports for ${relativePath}, ${source.length}`);
     let newImports = this.parseImports(relativePath, source);
     if (!isEqual(this.paths.get(relativePath), newImports)) {
       this.paths.set(relativePath, newImports);
       this.modules = null; // invalidates cache
     }
+    // console.timeEnd("updateImports");
   }
 
   private processImportCallExpression(
@@ -215,7 +236,7 @@ export default class Analyzer extends Plugin {
   }
 
   private parseImports(relativePath: string, source: string): Import[] {
-    let ast: File | undefined;
+    let ast: File | Program | undefined;
     try {
       ast = this.parse!(source);
     } catch (err) {
@@ -229,26 +250,104 @@ export default class Analyzer extends Plugin {
       return imports;
     }
 
-    traverse(ast, {
-      CallExpression: path => {
-        let callee = path.get('callee');
-        if (callee.type === 'Import') {
-          imports.push(this.processImportCallExpression(relativePath, path.node.arguments, true));
-        } else if (callee.isIdentifier() && callee.referencesImport('@embroider/macros', 'importSync')) {
-          imports.push(this.processImportCallExpression(relativePath, path.node.arguments, false));
+    if (this.pack.useSwcParser) {
+      let self = this;
+      class ImportAnalyzer extends Visitor {
+        visitCallExpression(e: SwcCallExpression) {
+          let callee;
+          if (
+            e.callee.type === 'MemberExpression' &&
+            //@ts-ignore
+            e.callee.object.callee?.value === 'import'
+          ) {
+            callee = e.callee.object;
+          } else if (e.callee.type === 'Identifier' && e.callee.value === 'import') {
+            callee = e;
+          }
+          if (callee) {
+            // it's a syntax error to have anything other than exactly one
+            // argument, so we can just assume this exists
+            //@ts-ignore
+            let argument = callee.arguments[0];
+
+            switch (argument.expression.type) {
+              case 'StringLiteral':
+                imports.push({
+                  isDynamic: true,
+                  specifier: argument.expression.value,
+                  path: relativePath,
+                  package: self.pack,
+                  treeType: self.treeType,
+                });
+                break;
+              case 'TemplateLiteral':
+                let expression = argument.expression;
+                if (expression.quasis.length === 1) {
+                  imports.push({
+                    isDynamic: true,
+                    specifier: expression.quasis[0].cooked.value,
+                    path: relativePath,
+                    package: self.pack,
+                    treeType: self.treeType,
+                  });
+                } else {
+                  imports.push({
+                    isDynamic: true,
+                    cookedQuasis: expression.quasis.map(
+                      (templateElement: SwcTemplateElement) => templateElement.cooked.value
+                    ),
+                    expressionNameHints: [...expression.expressions].map(swcInferNameHint),
+                    path: relativePath,
+                    package: self.pack,
+                    treeType: self.treeType,
+                  });
+                }
+                break;
+              default:
+                throw new Error('import() is only allowed to contain string literals or template string literals');
+            }
+          }
+          return e;
         }
-      },
-      ImportDeclaration: path => {
-        imports.push({
-          isDynamic: false,
-          specifier: path.node.source.value,
-          path: relativePath,
-          package: this.pack,
-          treeType: this.treeType,
-        });
-      },
-      ExportNamedDeclaration: path => {
-        if (path.node.source) {
+
+        visitImportDeclaration(e: SwcImportDeclaration) {
+          imports.push({
+            isDynamic: false,
+            specifier: e.source.value,
+            path: relativePath,
+            package: self.pack,
+            treeType: self.treeType,
+          });
+          return e;
+        }
+
+        visitExportNamedDeclaration(e: SwcExportNamedDeclaration) {
+          if (e.source) {
+            imports.push({
+              isDynamic: false,
+              specifier: e.source.value,
+              path: relativePath,
+              package: self.pack,
+              treeType: self.treeType,
+            });
+          }
+          return e;
+        }
+      }
+      swcTransfromSync(ast as Program, {
+        plugin: m => new ImportAnalyzer().visitProgram(m),
+      });
+    } else {
+      traverse(ast as File, {
+        CallExpression: path => {
+          let callee = path.get('callee');
+          if (callee.type === 'Import') {
+            imports.push(this.processImportCallExpression(relativePath, path.node.arguments, true));
+          } else if (callee.isIdentifier() && callee.referencesImport('@embroider/macros', 'importSync')) {
+            imports.push(this.processImportCallExpression(relativePath, path.node.arguments, false));
+          }
+        },
+        ImportDeclaration: path => {
           imports.push({
             isDynamic: false,
             specifier: path.node.source.value,
@@ -256,11 +355,40 @@ export default class Analyzer extends Plugin {
             package: this.pack,
             treeType: this.treeType,
           });
-        }
-      },
-    });
+        },
+        ExportNamedDeclaration: path => {
+          if (path.node.source) {
+            imports.push({
+              isDynamic: false,
+              specifier: path.node.source.value,
+              path: relativePath,
+              package: this.pack,
+              treeType: this.treeType,
+            });
+          }
+        },
+      });
+    }
     return imports;
   }
+}
+
+async function swcParser(swcOptions: ParseOptions): Promise<(source: string) => Program> {
+  let swc = import('@swc/core');
+
+  const { parseSync } = await swc;
+  return function (source: string) {
+    return parseSync(
+      source,
+      Object.assign(
+        {
+          dynamicImport: true,
+          decorators: true,
+        },
+        swcOptions
+      )
+    ) as Program;
+  };
 }
 
 async function babel7Parser(babelOptions: TransformOptions): Promise<(source: string) => File> {
@@ -270,6 +398,12 @@ async function babel7Parser(babelOptions: TransformOptions): Promise<(source: st
   return function (source: string) {
     return parseSync(source, babelOptions) as File;
   };
+}
+
+function swcInferNameHint(exp: SwcExpression | TSType) {
+  if (exp.type === 'Identifier') {
+    return exp.value;
+  }
 }
 
 function inferNameHint(exp: Expression | TSType) {
